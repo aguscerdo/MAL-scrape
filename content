@@ -1,0 +1,16 @@
+Key - Content
+
+!- From myanimelist.net/anime/id
+
+/anime/genre/\d*/ - Genre id. Multiple
+/anime/producer/\d*/ - Studios + Producers
+"ratingValue">[\d .]</ - Rating score
+"ratingCount">]\d ,]</ - Rating count
+/anime/{id}/{title?}/ - Title
+
+
+
+!- From myanimelist.net/anime/{id}/{title}/userrecs
+Retrieve {id}-{id2} and {id2}-{id} links
+-> From /recommendations/{id}-{id2}
+get count of Recommended By
