@@ -22,35 +22,30 @@ class Extracter:
             # TODO Open DB
         if file:
             try:
-                with open("shows.json", "r") as f:
+                with open("data/shows.json", "r") as f:
                     self.i = re.search(r"\"id\": (\d+),", (f.readlines()[-1])).group(1)
                     self.i = int(self.i)
-                    self.file = open("shows.json", "a+")
+                    self.file = open("data/shows.json", "a+")
                     print("Resuming at index {}".format(self.i))
             except:
-                self.file = open("shows.json", "w+")
+                self.file = open("data/shows.json", "w+")
 
 
-
-    def retrieve(self, iter=-1, start_i=0, fail_limit=400, sleep=True, verbose=True):
+    def retrieve(self, init=-1, start_i=0, fail_limit=400, sleep=True, verbose=True):
         # --- Input --- #
         #   + verbose: Print information about actions. Default True
         #   + iter: number of max iterations to run. Default to -1 -> infinite
         #   + start_i: index to start looking from. Overwrites file i
-        #   + fail_limit: maximum number of failures sequence allowed. Every failure decreases count by 1, every success increases by 1
+        #   + fail_limit: maximum number of failures sequence allowed.
+        #       Every failure decreases count by 1, every success increases by 1
         #   + sleep: sleep for around 1 second between calls.
-
 
         self.sleep = sleep
         if  start_i > 0:
             self.i = start_i - 1
         self.verbose = verbose
 
-
-        if iter > 0:
-            top = self.i + iter
-        else:
-            top = 0
+        top = self.i + init if init > 0 else 0
         self.try_again = True
 
         if fail_limit > 0:
@@ -99,7 +94,7 @@ class Extracter:
         soup = BeautifulSoup(response, 'lxml')
         producers = {}
 
-        producer_file = open("producers.json", 'w+')
+        producer_file = open("data/producers.json", 'w+')
 
         for p in soup.find_all('a', href=re.compile(r'producer/\d+/')):
             link = p.get('href')
@@ -116,6 +111,7 @@ class Extracter:
 
     # --- URL functions --- #
     def __url_main(self):
+        self.__flush()
         self.state = True
         url = "https://myanimelist.net/anime/{}".format(self.show['id'])
         try:
@@ -143,6 +139,7 @@ class Extracter:
 
         self.__write_to_file()
 
+
         return 0
 
 
@@ -153,7 +150,7 @@ class Extracter:
             response = urllib.request.urlopen(url)
         except:
             self.__talk("Could not retrieve recommendations: {}".format(self.i))
-            self.show['recs'] = {}
+            self.show['recs'] = None
             return
         soup_rec = BeautifulSoup(response, 'lxml')
         recommendations = []
@@ -211,22 +208,27 @@ class Extracter:
 
     def __get_season(self):
         season =  self.soup.find("a", href=re.compile(r'season/'))
-        if not season:
-            self.show['season'] = "X0000"
-            return
-        season = season.text
-        year = re.search(r'\d+$', season).group(0)
-
-        if season[0] == 'S':
-            s = season[0:1]
+        if not season:  # Non standard date
+            season = re.search(r'[a-zA-Z]{3} \d\d, \d{4}\n', self.soup.text)
+            if not season:
+                self.show['season'] = None
+            else:
+                self.show['season'] = self.__parse_date(season.group(0))
         else:
-            s = season[0]
-        self.show['season'] = "{}{}".format(s, year)
+            season = season.text
+            year = re.search(r'\d+$', season).group(0)
+
+            if season[0] == 'S':
+                s = season[0:2]
+            else:
+                s = season[0]
+            self.show['season'] = "{}{}".format(s, year)
+
 
     def __get_type(self):
         t = self.soup.find('a', href=re.compile('\?type='))
         if not t:
-            self.show['type'] = "None"
+            self.show['type'] = None
             return
         self.show['type'] = t.text
 
@@ -252,12 +254,31 @@ class Extracter:
 
     def __write_to_file(self):
         if self.mode_file:
-            self.file.write("{}\n".format(self.show).replace("'", '"'))
+            self.file.write("{}\n".format(json.dumps(self.show)).replace("'", '"'))
+
+
+    def __flush(self):
         if self.i % 10 == 0:
-            self.__talk("Flushed...")
+            self.__talk("--- Flushed... ---")
             self.file.flush()
 
     # ------------ Other functions ------------ #
+    def __parse_date(self, str):
+        month = re.search(r'[a-zA-Z]{3}', str).group(0)
+        year = re.search(r'\d{4}', str).group(0)
+
+        if month in ['Jan', 'Feb', 'Mar']:
+            season = 'W'
+        elif month in ['Apr', 'May', 'Jun']:
+            season = 'Sp'
+        elif month in ['Jul', 'Aug', 'Sep']:
+            season = 'Su'
+        else:
+            season = 'F'
+
+        return "{}{}".format(season, year)
+
+
 
     def __sleepy(self, time_s):
         if self.sleep:
