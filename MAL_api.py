@@ -144,9 +144,9 @@ class Extracter:
 
 
     def __url_rec(self):
-        url = self.soup.find('a', href=re.compile(r'/userrecs')).get('href')
-        url = quote(url, safe=':/')
         try:
+            url = self.soup.find('a', href=re.compile(r'/userrecs')).get('href')
+            url = quote(url, safe=':/')
             response = urllib.request.urlopen(url)
         except:
             self.__talk("Could not retrieve recommendations: {}".format(self.i))
