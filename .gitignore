@@ -4,3 +4,4 @@ Reference
 __pycache__
 data/producers.json
 data/shows.json
+db_config.json

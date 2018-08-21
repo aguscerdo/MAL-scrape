@@ -6,290 +6,371 @@ import re
 import time
 import json
 import atexit
-
-
+import pymysql
 
 
 class Extracter:
-    def __init__(self, db_name=None, DB=False, file=False):
-        self.fail_max = 400
-        self.i = 0
-        self.mode_db = DB
-        self.mode_file = file
-        if DB:
-            self.db = db_name
-            self.__open_db()
-            # TODO Open DB
-        if file:
-            try:
-                with open("data/shows.json", "r") as f:
-                    self.i = re.search(r"\"id\": (\d+),", (f.readlines()[-1])).group(1)
-                    self.i = int(self.i)
-                    self.file = open("data/shows.json", "a+")
-                    print("Resuming at index {}".format(self.i))
-            except:
-                self.file = open("data/shows.json", "w+")
+	def __init__(self, db=None, file=False):
+		self.fail_max = 400
+		self.show_id = 0
+		self.db = None
+		self.show = {}
+		self.sleep = True
+		self.verbose = True
+		self.proceed = 20
+		self.try_again = True
+		self.file = None
+		self.idx = 0
+		
+		if db is not None:
+			self.__open_db(db)
+			self.file = None
+		elif file:
+			try:
+				with open("data/shows.json", "r") as f:
+					self.show_id = re.search(r"\"id\": (\d+),", (f.readlines()[-1])).group(1)
+					self.show_id = int(self.show_id)
+					self.file = open("data/shows.json", "a+")
+					print("Resuming at index {}".format(self.show_id))
+			except:
+				self.file = open("data/shows.json", "w+")
 
 
-    def retrieve(self, init=-1, start_i=0, fail_limit=400, sleep=True, verbose=True):
-        # --- Input --- #
-        #   + verbose: Print information about actions. Default True
-        #   + iter: number of max iterations to run. Default to -1 -> infinite
-        #   + start_i: index to start looking from. Overwrites file i
-        #   + fail_limit: maximum number of failures sequence allowed.
-        #       Every failure decreases count by 1, every success increases by 1
-        #   + sleep: sleep for around 1 second between calls.
+	def __del__(self):
+		if self.db is not None:
+			try:
+				self.db.close()
+			except:
+				pass
+		if self.file is not None:
+			try:
+				self.file.close()
+			except:
+				pass
+			
+			
+	def retrieve(self, init=-1, start_i=0, fail_limit=400, sleep=True, verbose=True):
+		# --- Input --- #
+		#   + verbose: Print information about actions. Default True
+		#   + iter: number of max iterations to run. Default to -1 -> infinite
+		#   + start_i: index to start looking from. Overwrites file i
+		#   + fail_limit: maximum number of failures sequence allowed.
+		#	   Every failure decreases count by 1, every success increases by 1
+		#   + sleep: sleep for around 1 second between calls.
 
-        self.sleep = sleep
-        if  start_i > 0:
-            self.i = start_i - 1
-        self.verbose = verbose
+		self.sleep = sleep
+		if start_i > 0:
+			self.show_id = start_i - 1
+		self.verbose = verbose
 
-        top = self.i + init if init > 0 else 0
-        self.try_again = True
+		top = self.show_id + init if init > 0 else 0
+		self.try_again = True
 
-        if fail_limit > 0:
-            self.proceed = fail_limit
-            self.fail_max = fail_limit
-        else:
-            self.proceed = self.fail_max
+		if fail_limit > 0:
+			self.proceed = fail_limit
+			self.fail_max = fail_limit
+		else:
+			self.proceed = self.fail_max
 
+		while self.proceed > 0 and not (top and self.show_id > top):
+			self.__flush()
 
-        while self.proceed > 0 and not (top and self.i > top):
-            if self.mode_file and self.i % 10 == 0:
-                self.file.flush()
+			self.__increase_show_id()
+			ret = self.__url_main()	 # url_main returns 0 on success, 1 on failure
+			if not ret:
+				self.__url_rec()
+				self.__talk(self.show)
+				self.__sleepy(0.25)
+			else:
+				self.__sleepy(0.5)
+				if self.try_again:
+					self.__sleepy(0.5)
+					self.try_again = False
+					self.show_id -= 1
+					self.proceed = min(self.proceed+2, self.fail_max)
+					continue
 
-            self.show = {}
-            self.__get_index()
-            ret = self.__url_main()     # url_main returns 0 on success, 1 on failure
-            if not ret:
-                self.__url_rec()
-                if self.verbose:
-                    self.__talk(self.show)
-                # self.__insert_to_shows()
-                self.__sleepy(0.25)
-            else:
-                self.__sleepy(0.5)
-                if self.try_again:
-                    self.__sleepy(0.5)
-                    self.try_again = False
-                    self.i -= 1
-                    self.proceed = min(self.proceed+2, self.fail_max)
-                    continue
+			self.proceed = min(self.proceed+1, self.fail_max)
+			self.try_again = True
 
-            self.proceed = min(self.proceed+1, self.fail_max)
-            self.try_again = True
-
-        if self.mode_file:
-            self.file.close()
-
-
-    def update_producers(self, verbose=False):
-        url = "https://myanimelist.net/anime/producer"
-        try:
-            response = urllib.request.urlopen(url)
-        except:
-            print("Could not retrieve producer data")
-            return
-        soup = BeautifulSoup(response, 'lxml')
-        producers = {}
-
-        producer_file = open("data/producers.json", 'w+')
-
-        for p in soup.find_all('a', href=re.compile(r'producer/\d+/')):
-            link = p.get('href')
-            id = re.search(r'\d+', link).group(0)
-            name = re.search(r'\d+/.*$', link).group(0).replace('{}'.format(id), '').replace('/', '')
-            producers[id] = name
-            if verbose:
-                print("ID: {} -- NAME: {}".format(id, name))
-            producer_file.write('{"id" : %s, "name" : "%s"}\n' % (id, name))
-            self.__insert_to_producers(id, name)
-
-        producer_file.close()
+		if self.file is not None:
+			self.file.close()
+		if self.db is not None:
+			self.__close_db()
 
 
-    # --- URL functions --- #
-    def __url_main(self):
-        self.__flush()
-        self.state = True
-        url = "https://myanimelist.net/anime/{}".format(self.show['id'])
-        try:
-            response = urllib.request.urlopen(url)
-        except:
-            self.proceed -= 2
-            self.__talk("{} - Could not retrieve anime: {}".format(self.proceed, self.i))
-            return 1
-        self.soup = BeautifulSoup(response, 'lxml')
+	def update_producers(self, verbose=False):
+		url = "https://myanimelist.net/anime/producer"
+		try:
+			response = urllib.request.urlopen(url)
+		except:
+			print("Could not retrieve producer data")
+			return
+		soup = BeautifulSoup(response, 'lxml')
+		producers = {}
+		if self.file is not None:
+			producer_file = open("data/producers.json", 'w+')
 
-        # Main page data
-        self.__find_name()
-        self.__find_genre()
-        self.__get_stats()
-        self.__get_studio()
-        self.__get_season()
-        self.__get_type()
+		for p in soup.find_all('a', href=re.compile(r'producer/\d+/')):
+			link = p.get('href')
+			pid = re.search(r'\d+', link).group(0)
+			name = re.search(r'\d+/.*$', link).group(0).replace('{}'.format(pid), '').replace('/', '')
+			producers[pid] = name
+			if verbose:
+				print("ID: {} -- NAME: {}".format(pid, name))
+				
+			if self.file is not None:
+				producer_file.write('{"id" : %s, "name" : "%s"}\n' % (pid, name))
+			if self.db is not None:
+				self.__insert_to_producers(pid, name)
 
-        # Rec page data
-        self.__url_rec()
-
-        # DB actions
-        # TODO DB
-        # self.__write_to_db()
-
-        self.__write_to_file()
+		if self.file is not None:
+			producer_file.close()
 
 
-        return 0
+	# --- URL functions --- #
+	def __url_main(self):
+		self.state = True
+		url = "https://myanimelist.net/anime/{}".format(self.show['id'])
+		try:
+			response = urllib.request.urlopen(url)
+		except:
+			self.proceed -= 2
+			self.__talk("{} - Could not retrieve anime: {}".format(self.proceed, self.show_id))
+			return 1
+		self.soup = BeautifulSoup(response, 'lxml')
+
+		# Main page data
+		self.__find_name()
+		self.__find_genre()
+		self.__get_stats()
+		self.__get_studio()
+		self.__get_season()
+		self.__get_type()
+
+		# Rec page data
+		self.__url_rec()
+
+		# DB actions
+		self.__insert_to_db()
+		self.__write_to_file()
+
+		return 0
 
 
-    def __url_rec(self):
-        try:
-            url = self.soup.find('a', href=re.compile(r'/userrecs')).get('href')
-            url = quote(url, safe=':/')
-            response = urllib.request.urlopen(url)
-        except:
-            self.__talk("Could not retrieve recommendations: {}".format(self.i))
-            self.show['recs'] = None
-            return
-        soup_rec = BeautifulSoup(response, 'lxml')
-        recommendations = []
-        # Get all links
-        for rec in soup_rec.find_all('a', href=re.compile('/\d+-\d+')):
-            id = re.search(r'\d+-\d+'.format(self.i), rec.get('href')).group(0).replace("{}".format(self.i), "").replace("-", '')
-            recommendations.append(id)
+	def __url_rec(self):
+		try:
+			url = self.soup.find('a', href=re.compile(r'/userrecs')).get('href')
+			url = quote(url, safe=':/')
+			response = urllib.request.urlopen(url)
+		except:
+			self.__talk("Could not retrieve recommendations: {}".format(self.show_id))
+			self.show['recs'] = None
+			return
+		soup_rec = BeautifulSoup(response, 'lxml')
+		
+		# Process a recommendation match of the form '<int>-<int>'
+		def rec_id_function(rec):
+			rec_url = re.search(r'(/recommendations/anime/)(\d+-\d+)'.format(self.show_id), rec.get('href')).group(2)
+			distinct_numbers = re.findall(r'\d+', rec_url)
+			rec_id = int(distinct_numbers[0]) if int(distinct_numbers[0]) != self.show_id else int(distinct_numbers[1])
+			return rec_id
+			
+		# Find all links of the form 'recommendations/anime/<int>-<int>'
+		recommendations = [rec_id_function(rec)
+		                   for rec in soup_rec.find_all('a', href=re.compile('/recommendations/anime/\d+-\d+'))]
 
-        # Get number of recs
-        rec_count = [1] * len(recommendations)
-        for i, val in enumerate(soup_rec.find_all('a', {'class':"js-similar-recommendations-button"})):
-            rec_count[i] = int(val.find('strong').text) + 1
+		# Get number of recs
+		rec_count = [1] * len(recommendations)
+		for i, val in enumerate(soup_rec.find_all('a', {'class':"js-similar-recommendations-button"})):
+			rec_count[i] = int(val.find('strong').text) + 1
 
-        dictionary = {}
-        for rec, count in zip(recommendations, rec_count):
-            dictionary[rec] = count
+		dictionary = {}
+		for rec, count in zip(recommendations, rec_count):
+			dictionary[rec] = count
 
-        self.show['recs'] = dictionary
-
-    # ------------ Parsing Functions ------------ #
-
-    def __find_name(self):
-        link = str(self.soup.find('link'))
-        self.show['name_'] = re.search(r'\d/([^"]+)', link).group(1)
-        # self.show['name'] = self.show['name_'].replace('_', ' ')
-
-
-    def __find_genre(self):
-        genres = []
-        for a in self.soup.find_all("a", href=re.compile(r'genre/(\d+)/')):
-            genres.append(re.search(r'genre/(\d+)/', str(a)).group(1))
-        self.show['genres'] = genres
+		self.show['recs'] = dictionary
 
 
-    def __get_stats(self):
-        # Score
-        stats = self.soup.find_all('span', itemprop=["ratingValue", "ratingCount"]) # Score, count
-        if not stats:
-            self.__talk("Could not retrieve stats: {}".format(self.i))
-            self.show['score'] = 0
-            self.show['scored_by'] = 0
-            return
-        numbers = re.findall(r'\d+[.,]?\d*', str(stats))
-        self.show['score'] = float(numbers[0])
-        self.show['scored_by'] = int(numbers[1].replace(',', ''))
+	# ------------ Parsing Functions ------------ #
+	def __find_name(self):
+		link = str(self.soup.find('link'))
+		self.show['name_'] = re.search(r'\d/([^"]+)', link).group(1)
+		# self.show['name'] = self.show['name_'].replace('_', ' ')
 
 
-    def __get_studio(self):
-        studio =  self.soup.find_all("a", href=re.compile(r'producer/'))
-        if not studio:
-            self.show['studio'] = "0"
-            return
-        self.show['studio'] = re.search(r'/producer/(\d+)/', str(studio[-1])).group(1)
+	def __find_genre(self):
+		genres = [int(re.search(r'genre/(\d+)/', str(a)).group(1))
+		          for a in self.soup.find_all("a", href=re.compile(r'genre/(\d+)/'))]
+		self.show['genres'] = genres
 
 
-    def __get_season(self):
-        season =  self.soup.find("a", href=re.compile(r'season/'))
-        if not season:  # Non standard date
-            season = re.search(r'[a-zA-Z]{3} \d\d, \d{4}\n', self.soup.text)
-            if not season:
-                self.show['season'] = None
-            else:
-                self.show['season'] = self.__parse_date(season.group(0))
-        else:
-            season = season.text
-            year = re.search(r'\d+$', season).group(0)
-
-            if season[0] == 'S':
-                s = season[0:2]
-            else:
-                s = season[0]
-            self.show['season'] = "{}{}".format(s, year)
+	def __get_stats(self):
+		# Score
+		stats = self.soup.find_all('span', itemprop=["ratingValue", "ratingCount"]) # Score, count
+		if not stats:
+			self.__talk("Could not retrieve stats: {}".format(self.show_id))
+			self.show['score'] = 0
+			self.show['scored_by'] = 0
+			return
+		numbers = re.findall(r'\d+[.,]?\d*', str(stats))
+		self.show['score'] = float(numbers[0])
+		self.show['scored_by'] = int(numbers[1].replace(',', ''))
 
 
-    def __get_type(self):
-        t = self.soup.find('a', href=re.compile('\?type='))
-        if not t:
-            self.show['type'] = None
-            return
-        self.show['type'] = t.text
+	def __get_studio(self):
+		studio =  self.soup.find_all("a", href=re.compile(r'producer/'))
+		if not studio:
+			self.show['studio'] = "0"
+			return
+		self.show['studio'] = int(re.search(r'/producer/(\d+)/', str(studio[-1])).group(1))
+		
+
+	def __get_season(self):
+		season =  self.soup.find("a", href=re.compile(r'season/'))
+		if not season:  # Non standard date
+			season = re.search(r'[a-zA-Z]{3} \d\d, \d{4}\n', self.soup.text)
+			if not season:
+				self.show['season'] = None
+			else:
+				self.show['season'] = self.__parse_date(season.group(0))
+		else:
+			season = season.text
+			year = re.search(r'\d+$', season).group(0)
+
+			if season[0] == 'S':
+				s = season[0:2]
+			else:
+				s = season[0]
+			self.show['season'] = "{}{}".format(s, year)
 
 
-
-    # ------------ Database/File functions ------------ #
-    def __open_db(self):
-        print("TODO")
-
-
-    def __get_index(self):  #TODO getid
-        self.i += 1
-        self.show['id'] = self.i
-
-
-    def __insert_to_producers(self, key, value):
-        if not self.mode_db:
-            return 1
-
-        prompt = 'INSERT INTO Producers ({}, "{}");'.format(key, value)
-        #TODO
-
-
-    def __write_to_file(self):
-        if self.mode_file:
-            self.file.write("{}\n".format(json.dumps(self.show)).replace("'", '"'))
-
-
-    def __flush(self):
-        if self.i % 10 == 0:
-            self.__talk("--- Flushed... ---")
-            self.file.flush()
-
-    # ------------ Other functions ------------ #
-    def __parse_date(self, str):
-        month = re.search(r'[a-zA-Z]{3}', str).group(0)
-        year = re.search(r'\d{4}', str).group(0)
-
-        if month in ['Jan', 'Feb', 'Mar']:
-            season = 'W'
-        elif month in ['Apr', 'May', 'Jun']:
-            season = 'Sp'
-        elif month in ['Jul', 'Aug', 'Sep']:
-            season = 'Su'
-        else:
-            season = 'F'
-
-        return "{}{}".format(season, year)
+	def __get_type(self):
+		t = self.soup.find('a', href=re.compile('\?type='))
+		if not t:
+			self.show['type'] = None
+			return
+		self.show['type'] = t.text
 
 
 
-    def __sleepy(self, time_s):
-        if self.sleep:
-            time.sleep(time_s)
+	# ------------ Database/File functions ------------ #
+	def __open_db(self, content):
+		self.db = pymysql.connect(
+			host='localhost',
+			user=content['user'],
+			password=content['password'],
+			db=content['database'],
+			charset='utf8mb4',
+			port=content['port'],
+			cursorclass=pymysql.cursors.DictCursor
+		)
 
-    def __talk(self, s):
-        if self.verbose:
-            print(s)
+		with self.db.cursor() as cursor:
+			sql = 'SELECT MAX(idx) as idx, MAX(show_id) as sid from mal_show'
+			cursor.execute(sql)
+			max_i = cursor.fetchone()
+			
+			self.idx = max_i['idx'] if max_i['idx'] is not None else 0
+			self.show_id = max_i['sid'] if max_i['sid'] is not None else 0
 
-    def __decode(self, s):
-        return quote(s)
+
+	def __close_db(self):
+		if self.db is not None:
+			self.db.commit()
+			self.db.close()
+	
+	
+	def __insert_to_producers(self, key, value):
+		if self.db is None:
+			return 1
+
+		sql = 'INSERT INTO mal_producers (producer_id, name) VALUES (%s, %s)'
+		with self.db.cursor() as cursor:
+			cursor.execute(sql, (key, value))
+		self.db.commit()
+
+	def __insert_to_db(self):
+		if self.db is not None:
+			sql0 = 'INSERT INTO mal_show ' \
+				   '(idx, show_id, name_, studio, score, scored_by, season, type) VALUES ' \
+				   '(%s, %s, %s, %s, %s, %s, %s, %s)'
+			    
+			sql1 = 'INSERT INTO mal_rec ' \
+				   '(idx, show_id, recommended_id, count) VALUES ' \
+				   '(%s, %s, %s, %s)'
+
+			sql2 = 'INSERT INTO mal_show_genres ' \
+				   '(idx, show_id, genre) VALUES ' \
+				   '(%s, %s, %s) '
+
+			with self.db.cursor() as cursor:
+				cursor.execute(sql0,
+				               (self.idx, self.show_id, self.show['name_'], self.show['studio'], self.show['score'],
+							    float(self.show['scored_by']),
+							    self.show['season'],
+							    self.show['type']))
+				
+				if self.show['recs'] is not None:
+					for rec in self.show['recs']:
+						cursor.execute(sql1, (self.idx, self.show_id, rec, self.show['recs'][rec]))
+				
+				if self.show['genres'] is not None:
+					for genre in self.show['genres']:
+						cursor.execute(sql2, (self.idx, self.show_id, genre))
+			self.__increase_idx()
+	
+	
+	def __write_to_file(self):
+		if self.file is not None:
+			self.file.write("{}\n".format(json.dumps(self.show)).replace("'", '"'))
+
+
+	def __flush(self):
+		if self.show_id % 10 == 0:
+			self.__talk("--- Flushing... ---")
+			if self.file is not None:
+				self.file.flush()
+			if self.db is not None:
+				self.db.commit()
+
+
+	# ------------ Other functions ------------ #
+	def __increase_show_id(self):
+		self.show_id += 1
+		self.show['id'] = self.show_id
+		
+	
+	def __increase_idx(self):
+		self.idx += 1
+		
+		
+	def __parse_date(self, str):
+		month = re.search(r'[a-zA-Z]{3}', str).group(0)
+		year = re.search(r'\d{4}', str).group(0)
+
+		if month in ['Jan', 'Feb', 'Mar']:
+			season = 'W'
+		elif month in ['Apr', 'May', 'Jun']:
+			season = 'Sp'
+		elif month in ['Jul', 'Aug', 'Sep']:
+			season = 'Su'
+		else:
+			season = 'F'
+
+		return "{}{}".format(season, year)
+
+
+	def __sleepy(self, time_s):
+		if self.sleep:
+			time.sleep(time_s)
+
+	def __talk(self, s):
+		if self.verbose:
+			print(s)
+
+	def __decode(self, s):
+		return quote(s)
 
 
 """ Show Parameters
@@ -298,7 +379,7 @@ id : Show ID number
 name : Name of show
 name_ : Name of show with '_' instead of ' '
 recs : list of linked ids
-    * linked id : [id, count]
+	* linked id : [id, count]
 studio : main Studio producer
 score : score rating (%f)
 scored_by : people that rated the show
