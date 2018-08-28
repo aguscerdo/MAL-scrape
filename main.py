@@ -42,8 +42,10 @@ def db_content_file():
 			   'studio INT, ' \
 			   'score FLOAT, ' \
 			   'scored_by INT, ' \
-			   'season CHAR(6), ' \
-	           'type VARCHAR(10)' \
+			   'season VARCHAR(6), ' \
+	           'year INT, ' \
+	           'type VARCHAR(10), ' \
+	           'nrec INT' \
 			   ')'
 
 	sql['1'] = 'CREATE TABLE IF NOT EXISTS mal_show_genres (' \

@@ -55,41 +55,44 @@ class Extracter:
 		#   + iter: number of max iterations to run. Default to -1 -> infinite
 		#   + start_i: index to start looking from. Overwrites file i
 		#   + fail_limit: maximum number of failures sequence allowed.
-		#	   Every failure decreases count by 1, every success increases by 1
+	#	   Every failure decreases count by 1, every success increases by 1
 		#   + sleep: sleep for around 1 second between calls.
 
 		self.sleep = sleep
 		if start_i > 0:
 			self.show_id = start_i - 1
+			
 		self.verbose = verbose
-
 		top = self.show_id + init if init > 0 else 0
 		self.try_again = True
-
+		
 		if fail_limit > 0:
 			self.proceed = fail_limit
 			self.fail_max = fail_limit
 		else:
 			self.proceed = self.fail_max
 
+		# Enter main loop
 		while self.proceed > 0 and not (top and self.show_id > top):
-			self.__flush()
-
-			self.__increase_show_id()
 			ret = self.__url_main()	 # url_main returns 0 on success, 1 on failure
 			if not ret:
+				# Successful retrieval, continue
 				self.__url_rec()
-				self.__talk(self.show)
-				self.__sleepy(0.25)
+				self.__verbose(self.show)
+				self.__sleepy(0.4)
+				self.__increase_idx()
+			
 			else:
-				self.__sleepy(0.5)
+				# Failed once, try again
+				self.__sleepy(0.4)
 				if self.try_again:
-					self.__sleepy(0.5)
+					self.__sleepy(0.25)
 					self.try_again = False
-					self.show_id -= 1
 					self.proceed = min(self.proceed+2, self.fail_max)
 					continue
-
+					
+			self.__increase_show_id()
+			self.__flush()
 			self.proceed = min(self.proceed+1, self.fail_max)
 			self.try_again = True
 
@@ -131,12 +134,12 @@ class Extracter:
 	# --- URL functions --- #
 	def __url_main(self):
 		self.state = True
-		url = "https://myanimelist.net/anime/{}".format(self.show['id'])
+		url = "https://myanimelist.net/anime/{}".format(self.show_id)
 		try:
 			response = urllib.request.urlopen(url)
 		except:
 			self.proceed -= 2
-			self.__talk("{} - Could not retrieve anime: {}".format(self.proceed, self.show_id))
+			self.__verbose("Could not retrieve anime: {}".format(self.show_id))
 			return 1
 		self.soup = BeautifulSoup(response, 'lxml')
 
@@ -164,7 +167,8 @@ class Extracter:
 			url = quote(url, safe=':/')
 			response = urllib.request.urlopen(url)
 		except:
-			self.__talk("Could not retrieve recommendations: {}".format(self.show_id))
+			self.__verbose("Could not retrieve recommendations: {}".format(self.show_id))
+			self.show['nrecs'] = 0
 			self.show['recs'] = None
 			return
 		soup_rec = BeautifulSoup(response, 'lxml')
@@ -188,7 +192,8 @@ class Extracter:
 		dictionary = {}
 		for rec, count in zip(recommendations, rec_count):
 			dictionary[rec] = count
-
+			
+		self.show['nrecs'] = len(dictionary)
 		self.show['recs'] = dictionary
 
 
@@ -209,7 +214,7 @@ class Extracter:
 		# Score
 		stats = self.soup.find_all('span', itemprop=["ratingValue", "ratingCount"]) # Score, count
 		if not stats:
-			self.__talk("Could not retrieve stats: {}".format(self.show_id))
+			self.__verbose("Could not retrieve stats: {}".format(self.show_id))
 			self.show['score'] = 0
 			self.show['scored_by'] = 0
 			return
@@ -232,18 +237,12 @@ class Extracter:
 			season = re.search(r'[a-zA-Z]{3} \d\d, \d{4}\n', self.soup.text)
 			if not season:
 				self.show['season'] = None
+				self.show['year'] = None
 			else:
-				self.show['season'] = self.__parse_date(season.group(0))
+				self.__parse_date(season.group(0))
 		else:
-			season = season.text
-			year = re.search(r'\d+$', season).group(0)
-
-			if season[0] == 'S':
-				s = season[0:2]
-			else:
-				s = season[0]
-			self.show['season'] = "{}{}".format(s, year)
-
+			self.__mini_parse_date(season)
+			
 
 	def __get_type(self):
 		t = self.soup.find('a', href=re.compile('\?type='))
@@ -272,9 +271,12 @@ class Extracter:
 			max_i = cursor.fetchone()
 			
 			self.idx = max_i['idx'] if max_i['idx'] is not None else 0
+			self.show['idx'] = self.idx
 			self.show_id = max_i['sid'] if max_i['sid'] is not None else 0
-
-
+			self.show['show_id'] = self.show_id
+			print("Resuming at index {}".format(self.show_id))
+	
+	
 	def __close_db(self):
 		if self.db is not None:
 			self.db.commit()
@@ -292,24 +294,24 @@ class Extracter:
 
 	def __insert_to_db(self):
 		if self.db is not None:
-			sql0 = 'INSERT INTO mal_show ' \
-				   '(idx, show_id, name_, studio, score, scored_by, season, type) VALUES ' \
-				   '(%s, %s, %s, %s, %s, %s, %s, %s)'
+			sql0 = 'REPLACE INTO mal_show ' \
+				   '(idx, show_id, name_, studio, score, scored_by, season, year, type, nrec) VALUES ' \
+				   '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)'
 			    
-			sql1 = 'INSERT INTO mal_rec ' \
+			sql1 = 'REPLACE INTO mal_rec ' \
 				   '(idx, show_id, recommended_id, count) VALUES ' \
 				   '(%s, %s, %s, %s)'
 
-			sql2 = 'INSERT INTO mal_show_genres ' \
+			sql2 = 'REPLACE INTO mal_show_genres ' \
 				   '(idx, show_id, genre) VALUES ' \
 				   '(%s, %s, %s) '
 
 			with self.db.cursor() as cursor:
 				cursor.execute(sql0,
-				               (self.idx, self.show_id, self.show['name_'], self.show['studio'], self.show['score'],
-							    float(self.show['scored_by']),
-							    self.show['season'],
-							    self.show['type']))
+				               (self.idx, self.show_id, self.show['name_'], self.show['studio'],
+				                self.show['score'], float(self.show['scored_by']),
+							    self.show['season'], self.show['year'],
+							    self.show['type'], self.show['nrecs']))
 				
 				if self.show['recs'] is not None:
 					for rec in self.show['recs']:
@@ -318,7 +320,6 @@ class Extracter:
 				if self.show['genres'] is not None:
 					for genre in self.show['genres']:
 						cursor.execute(sql2, (self.idx, self.show_id, genre))
-			self.__increase_idx()
 	
 	
 	def __write_to_file(self):
@@ -327,8 +328,8 @@ class Extracter:
 
 
 	def __flush(self):
-		if self.show_id % 10 == 0:
-			self.__talk("--- Flushing... ---")
+		if not self.idx % 10 or not self.show_id % 100:
+			self.__verbose("--- Flushing... ---")
 			if self.file is not None:
 				self.file.flush()
 			if self.db is not None:
@@ -338,38 +339,56 @@ class Extracter:
 	# ------------ Other functions ------------ #
 	def __increase_show_id(self):
 		self.show_id += 1
-		self.show['id'] = self.show_id
+		self.show['show_id'] = self.show_id
 		
 	
 	def __increase_idx(self):
 		self.idx += 1
+		self.show['idx'] = self.idx
 		
 		
 	def __parse_date(self, str):
 		month = re.search(r'[a-zA-Z]{3}', str).group(0)
-		year = re.search(r'\d{4}', str).group(0)
+		self.show['year'] = int(re.search(r'\d{4}', str).group(0))
 
 		if month in ['Jan', 'Feb', 'Mar']:
-			season = 'W'
+			self.show['season'] = 'Winter'
 		elif month in ['Apr', 'May', 'Jun']:
-			season = 'Sp'
+			self.show['season'] = 'Spring'
 		elif month in ['Jul', 'Aug', 'Sep']:
-			season = 'Su'
+			self.show['season'] = 'Summer'
 		else:
-			season = 'F'
-
-		return "{}{}".format(season, year)
-
+			self.show['season'] = 'Fall'
+		
+	
+	def __mini_parse_date(self, season):
+		season = season.text
+		self.show['year'] = int(re.search(r'\d+$', season).group(0))
+		
+		if season[0] == 'S':
+			if season[1] == 'p':
+				self.show['season'] = 'Spring'
+			else:
+				self.show['season'] = 'Summer'
+		elif season[0] == 'W':
+			self.show['season'] = 'Winter'
+		elif season[0] == 'F':
+			self.show['season'] = 'Fall'
+		else:
+			self.show['season'] = None
+		
 
 	def __sleepy(self, time_s):
 		if self.sleep:
 			time.sleep(time_s)
 
-	def __talk(self, s):
+
+	def __verbose(self, s):
 		if self.verbose:
 			print(s)
-
-	def __decode(self, s):
+			
+	@staticmethod
+	def __decode(s):
 		return quote(s)
 
 
@@ -385,7 +404,8 @@ score : score rating (%f)
 scored_by : people that rated the show
 season : Season of premiere. Format [F|W|Sp|Su]{year}
 
-END """
+END
+"""
 
 
 
