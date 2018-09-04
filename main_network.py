@@ -2,7 +2,7 @@ import network
 import json
 
 def main(db):
-	net = network.MALNetwork(db=db)
+	net = network.MALNetwork(db=db, min_rec=0)
 	net.build_network()
 	net.save_graph()
 	# net.load_graph()

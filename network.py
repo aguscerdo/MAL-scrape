@@ -7,11 +7,12 @@ import matplotlib.pyplot as plt
 import pickle
 
 class MALNetwork:
-	def __init__(self, db=None):
+	def __init__(self, db=None, min_rec=5):
 		self.db = None
 		self.sparse = None
 		self.graph = nx.Graph()
 		self.sparse = None
+		self.min_rec=min_rec
 		if db is not None:
 			self.__open_db(db)
 	
@@ -47,10 +48,10 @@ class MALNetwork:
 
 		print('\tForming plot...')
 		cmap = plt.cm.inferno_r
-		nx.draw(self.graph, layout, node_size=1, alpha=0.5, width=0.03, node_color=c_range, cmap=cmap)
+		nx.draw(self.graph, layout, node_size=1, alpha=0.25, width=0.03, node_color=c_range, cmap=cmap)
 		
 		print('\tSaving high-res graph...')
-		plt.savefig(path, dpi=2000)
+		plt.savefig(path, dpi=3000)
 		
 		plt.show()
 		print('-- Finished drawing graph --')
@@ -76,12 +77,6 @@ class MALNetwork:
 		plt.spy(self.sparse)
 		# plt.colorbar()
 		plt.savefig(path)
-		plt.show()
-		
-
-		
-
-
 		
 		
 	# ---- Helpers ---- #
@@ -98,7 +93,7 @@ class MALNetwork:
 		)
 
 		
-	def __populate_nodes(self, min_recs=5):
+	def __populate_nodes(self):
 		# Populate graph with nodes containing all data stores in a show
 		sql = 'SELECT * FROM mal_show WHERE (idx BETWEEN %s AND %s) AND nrec > %s'
 		
@@ -108,7 +103,7 @@ class MALNetwork:
 			print('Populating nodes %d - %d...' % (i, i + delta-1))
 			i += delta
 			with self.db.cursor() as cursor:
-				cursor.execute(sql, (i, i + delta-1, min_recs))
+				cursor.execute(sql, (i, i + delta-1, self.min_rec))
 				response = cursor.fetchall()
 				if not response:
 					break
@@ -122,13 +117,13 @@ class MALNetwork:
 		print('-- Finished populating nodes --')
 		
 		
-	def __populate_edges(self, min_recs = 5):
+	def __populate_edges(self):
 		sql = 'SELECT * FROM mal_rec WHERE show_id in ' \
 		       '(SELECT show_id FROM mal_show WHERE nrec > %s AND nrec < 30)'
 
 		print('Populating edges...')
 		with self.db.cursor() as cursor:
-			cursor.execute(sql, (min_recs))
+			cursor.execute(sql, (self.min_rec))
 			response = cursor.fetchall()
 		
 		self.graph.add_weighted_edges_from([[row['show_id'], row['recommended_id'], row['count']]

@@ -7,34 +7,25 @@ import time
 import json
 import atexit
 import pymysql
-
+import numpy as np
 
 class Extracter:
-	def __init__(self, db=None, file=False):
+	def __init__(self, db=None, use_file=False, retry=False):
 		self.fail_max = 400
 		self.show_id = 0
 		self.db = None
 		self.show = {}
 		self.sleep = True
 		self.verbose = True
-		self.proceed = 20
-		self.try_again = True
+		self.proceed = 200
 		self.file = None
 		self.idx = 0
+		self.retry=retry
 		
-		if db is not None:
-			self.__open_db(db)
-			self.file = None
-		elif file:
-			try:
-				with open("data/shows.json", "r") as f:
-					self.show_id = re.search(r"\"id\": (\d+),", (f.readlines()[-1])).group(1)
-					self.show_id = int(self.show_id)
-					self.file = open("data/shows.json", "a+")
-					print("Resuming at index {}".format(self.show_id))
-			except:
-				self.file = open("data/shows.json", "w+")
-
+		self.db_config = db
+		
+		self.file=None
+		self.use_file = use_file
 
 	def __del__(self):
 		if self.db is not None:
@@ -55,8 +46,11 @@ class Extracter:
 		#   + iter: number of max iterations to run. Default to -1 -> infinite
 		#   + start_i: index to start looking from. Overwrites file i
 		#   + fail_limit: maximum number of failures sequence allowed.
-	#	   Every failure decreases count by 1, every success increases by 1
+		#	   Every failure decreases count by 1, every success increases by 1
 		#   + sleep: sleep for around 1 second between calls.
+		self.__open_file()
+		self.__open_db()
+
 
 		self.sleep = sleep
 		if start_i > 0:
@@ -64,7 +58,6 @@ class Extracter:
 			
 		self.verbose = verbose
 		top = self.show_id + init if init > 0 else 0
-		self.try_again = True
 		
 		if fail_limit > 0:
 			self.proceed = fail_limit
@@ -76,33 +69,33 @@ class Extracter:
 		while self.proceed > 0 and not (top and self.show_id > top):
 			ret = self.__url_main()	 # url_main returns 0 on success, 1 on failure
 			if not ret:
-				# Successful retrieval, continue
+				# Successful retrieval
 				self.__url_rec()
 				self.__verbose(self.show)
-				self.__sleepy(0.4)
 				self.__increase_idx()
-			
+				self.__success_flush()
+				self.proceed = min(self.proceed + 1, self.fail_max)
 			else:
-				# Failed once, try again
-				self.__sleepy(0.4)
-				if self.try_again:
-					self.__sleepy(0.25)
-					self.try_again = False
-					self.proceed = min(self.proceed+2, self.fail_max)
-					continue
-					
+				self.proceed -= 1
+
+			self.__fail_flush()
+			self.__sleepy(0.5)
 			self.__increase_show_id()
-			self.__flush()
-			self.proceed = min(self.proceed+1, self.fail_max)
-			self.try_again = True
 
-		if self.file is not None:
-			self.file.close()
-		if self.db is not None:
-			self.__close_db()
-
+		self.__close_file()
+		self.__close_db()
 
 	def update_producers(self, verbose=False):
+		if self.use_file:
+			try:
+				producer_file = open("data/producers.json", "a+")
+			except:
+				producer_file = open("data/producers.json", "w+")
+
+			
+		if self.db_config is not None:
+			self.__open_db()
+		
 		url = "https://myanimelist.net/anime/producer"
 		try:
 			response = urllib.request.urlopen(url)
@@ -119,16 +112,18 @@ class Extracter:
 			pid = re.search(r'\d+', link).group(0)
 			name = re.search(r'\d+/.*$', link).group(0).replace('{}'.format(pid), '').replace('/', '')
 			producers[pid] = name
-			if verbose:
-				print("ID: {} -- NAME: {}".format(pid, name))
+			self.__verbose("ID: {} -- NAME: {}".format(pid, name))
 				
-			if self.file is not None:
+			if self.use_file:
 				producer_file.write('{"id" : %s, "name" : "%s"}\n' % (pid, name))
+				
 			if self.db is not None:
 				self.__insert_to_producers(pid, name)
 
-		if self.file is not None:
+		if self.use_file is not None:
 			producer_file.close()
+		if self.db_config is not None:
+			self.__close_db()
 
 
 	# --- URL functions --- #
@@ -138,7 +133,6 @@ class Extracter:
 		try:
 			response = urllib.request.urlopen(url)
 		except:
-			self.proceed -= 2
 			self.__verbose("Could not retrieve anime: {}".format(self.show_id))
 			return 1
 		self.soup = BeautifulSoup(response, 'lxml')
@@ -154,10 +148,9 @@ class Extracter:
 		# Rec page data
 		self.__url_rec()
 
-		# DB actions
+		# Storing actions
 		self.__insert_to_db()
-		self.__write_to_file()
-
+		self.__write_show_to_file()
 		return 0
 
 
@@ -189,11 +182,9 @@ class Extracter:
 		for i, val in enumerate(soup_rec.find_all('a', {'class':"js-similar-recommendations-button"})):
 			rec_count[i] = int(val.find('strong').text) + 1
 
-		dictionary = {}
-		for rec, count in zip(recommendations, rec_count):
-			dictionary[rec] = count
+		dictionary = {rec: count for rec, count in zip(recommendations, rec_count)}
 			
-		self.show['nrecs'] = len(dictionary)
+		self.show['nrecs'] = int(np.sum([int(dictionary[r]) for r in dictionary]))
 		self.show['recs'] = dictionary
 
 
@@ -252,16 +243,18 @@ class Extracter:
 		self.show['type'] = t.text
 
 
-
-	# ------------ Database/File functions ------------ #
-	def __open_db(self, content):
+	# ------------ Database functions ------------ #
+	def __open_db(self):
+		if self.db_config is None:
+			return
+		
 		self.db = pymysql.connect(
 			host='localhost',
-			user=content['user'],
-			password=content['password'],
-			db=content['database'],
+			user=self.db_config['user'],
+			password=self.db_config['password'],
+			db=self.db_config['database'],
 			charset='utf8mb4',
-			port=content['port'],
+			port=self.db_config['port'],
 			cursorclass=pymysql.cursors.DictCursor
 		)
 
@@ -286,57 +279,88 @@ class Extracter:
 	def __insert_to_producers(self, key, value):
 		if self.db is None:
 			return 1
-
+		
 		sql = 'INSERT INTO mal_producers (producer_id, name) VALUES (%s, %s)'
 		with self.db.cursor() as cursor:
 			cursor.execute(sql, (key, value))
 		self.db.commit()
-
+	
+	
 	def __insert_to_db(self):
-		if self.db is not None:
-			sql0 = 'REPLACE INTO mal_show ' \
-				   '(idx, show_id, name_, studio, score, scored_by, season, year, type, nrec) VALUES ' \
-				   '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)'
-			    
-			sql1 = 'REPLACE INTO mal_rec ' \
-				   '(idx, show_id, recommended_id, count) VALUES ' \
-				   '(%s, %s, %s, %s)'
-
-			sql2 = 'REPLACE INTO mal_show_genres ' \
-				   '(idx, show_id, genre) VALUES ' \
-				   '(%s, %s, %s) '
-
-			with self.db.cursor() as cursor:
-				cursor.execute(sql0,
-				               (self.idx, self.show_id, self.show['name_'], self.show['studio'],
-				                self.show['score'], float(self.show['scored_by']),
-							    self.show['season'], self.show['year'],
-							    self.show['type'], self.show['nrecs']))
-				
-				if self.show['recs'] is not None:
-					for rec in self.show['recs']:
-						cursor.execute(sql1, (self.idx, self.show_id, rec, self.show['recs'][rec]))
-				
-				if self.show['genres'] is not None:
-					for genre in self.show['genres']:
-						cursor.execute(sql2, (self.idx, self.show_id, genre))
+		if self.db is None:
+			return
+		sql0 = 'REPLACE INTO mal_show ' \
+		       '(idx, show_id, name_, studio, score, scored_by, season, year, type, nrec) VALUES ' \
+		       '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)'
+		
+		sql1 = 'REPLACE INTO mal_rec ' \
+		       '(idx, show_id, recommended_id, count) VALUES ' \
+		       '(%s, %s, %s, %s)'
+		
+		sql2 = 'REPLACE INTO mal_show_genres ' \
+		       '(idx, show_id, genre) VALUES ' \
+		       '(%s, %s, %s) '
+		
+		with self.db.cursor() as cursor:
+			cursor.execute(sql0,
+			               (self.idx, self.show_id, self.show['name_'], self.show['studio'],
+			                self.show['score'], float(self.show['scored_by']),
+			                self.show['season'], self.show['year'],
+			                self.show['type'], self.show['nrecs']))
+			
+			if self.show['recs'] is not None:
+				for rec in self.show['recs']:
+					cursor.execute(sql1, (self.idx, self.show_id, rec, self.show['recs'][rec]))
+			
+			if self.show['genres'] is not None:
+				for genre in self.show['genres']:
+					cursor.execute(sql2, (self.idx, self.show_id, genre))
+						
+						
+	# ------------ File functions ------------ #
+	def __open_file(self):
+		if not self.use_file:
+			return
+		try:
+			with open("data/shows.json", "r") as f:
+				self.show_id = re.search(r"\"id\": (\d+),", (f.readlines()[-1])).group(1)
+				self.show_id = int(self.show_id)
+				self.file = open("data/shows.json", "a+")
+				self.__verbose("Resuming at index {}".format(self.show_id))
+		except:
+			self.file = open("data/shows.json", "w+")
 	
 	
-	def __write_to_file(self):
+	def __close_file(self):
+		if not self.use_file:
+			return
+		self.file.close()
+		
+		
+	def __write_show_to_file(self):
 		if self.file is not None:
 			self.file.write("{}\n".format(json.dumps(self.show)).replace("'", '"'))
 
 
-	def __flush(self):
-		if not self.idx % 10 or not self.show_id % 100:
+	# ------------ Other functions ------------ #
+	def __success_flush(self):
+		if not self.idx % 10:
 			self.__verbose("--- Flushing... ---")
 			if self.file is not None:
 				self.file.flush()
 			if self.db is not None:
 				self.db.commit()
-
-
-	# ------------ Other functions ------------ #
+				
+				
+	def __fail_flush(self):
+		if not self.show_id % 50:
+			self.__verbose("--- Flushing... ---")
+			if self.file is not None:
+				self.file.flush()
+			if self.db is not None:
+				self.db.commit()
+				
+				
 	def __increase_show_id(self):
 		self.show_id += 1
 		self.show['show_id'] = self.show_id

@@ -96,7 +96,7 @@ if __name__ == "__main__":
 	
 	db_content = db_content_file() if args.database else None
 
-	ex = mal.Extracter(db=db_content, file=args.file)
+	ex = mal.Extracter(db=db_content, use_file=args.file)
 
 	if args.producers:
 		ex.update_producers(verbose=args.verbose)
